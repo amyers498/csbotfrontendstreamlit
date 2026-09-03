@@ -136,6 +136,22 @@ def init_supabase_client() -> Tuple[Optional[Client], Optional[str]]:
     return None, f"Failed to authenticate with Supabase: {last_error}"
 
 
+def safe_to_datetime(series: pd.Series) -> pd.Series:
+    """
+    Safely convert timestamp series to datetimes with ISO8601 parsing,
+    handling microseconds, offsets, and mixed formats across Pandas versions.
+    """
+    if series is None or series.empty:
+        return series
+    try:
+        return pd.to_datetime(series, format="ISO8601", errors="coerce")
+    except Exception:
+        try:
+            return pd.to_datetime(series, format="mixed", errors="coerce")
+        except Exception:
+            return pd.to_datetime(series, errors="coerce")
+
+
 def fetch_account_snapshots(client: Client, limit: int = 500) -> pd.DataFrame:
     """
     Fetch historical account snapshots sorted by timestamp ASC for the equity curve.
@@ -157,7 +173,9 @@ def fetch_account_snapshots(client: Client, limit: int = 500) -> pd.DataFrame:
 
         df = pd.DataFrame(data)
         if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df["timestamp"] = safe_to_datetime(df["timestamp"])
+        if "created_at" in df.columns:
+            df["created_at"] = safe_to_datetime(df["created_at"])
         
         # Numeric conversions
         num_cols = [
@@ -208,7 +226,7 @@ def fetch_trades(
         # Datetime conversions
         for dt_col in ["entry_time", "exit_time", "created_at"]:
             if dt_col in df.columns:
-                df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
+                df[dt_col] = safe_to_datetime(df[dt_col])
 
         # Numeric conversions
         numeric_cols = [
@@ -268,7 +286,7 @@ def fetch_trade_events(
 
         df = pd.DataFrame(data)
         if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df["timestamp"] = safe_to_datetime(df["timestamp"])
 
         return df
     except Exception as e:
@@ -310,7 +328,7 @@ def fetch_orders(
         # Datetime conversions
         for dt_col in ["submitted_at", "filled_at", "created_at"]:
             if dt_col in df.columns:
-                df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
+                df[dt_col] = safe_to_datetime(df[dt_col])
 
         # Numeric conversions
         num_cols = [
