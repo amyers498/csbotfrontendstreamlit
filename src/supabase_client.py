@@ -1,0 +1,302 @@
+"""
+Supabase client helper for Crypto and Stock Trading Bot 2026.
+Handles resilient authentication, data querying, and Pandas transformations.
+"""
+
+import os
+from typing import Optional, Tuple
+import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
+
+# Load local .env file
+load_dotenv()
+
+# Attempt to import supabase; handle missing dependency gracefully
+try:
+    from supabase import create_client, Client
+    SUPABASE_INSTALLED = True
+except ImportError:
+    SUPABASE_INSTALLED = False
+    Client = None
+
+
+def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Search for Supabase credentials across standard environment variables
+    and Streamlit secrets.
+    """
+    # Potential URL environment variable names
+    url_keys = [
+        "SUPABASE_URL",
+        "NEXT_PUBLIC_SUPABASE_URL",
+        "VITE_SUPABASE_URL",
+        "PUBLIC_SUPABASE_URL",
+    ]
+    # Potential API key environment variable names
+    key_keys = [
+        "SUPABASE_SECRET_KEY",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_KEY",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    ]
+
+    supabase_url = None
+    supabase_key = None
+
+    # 1. Check Streamlit secrets first (if in Streamlit environment)
+    try:
+        if hasattr(st, "secrets"):
+            for k in url_keys:
+                if k in st.secrets:
+                    supabase_url = st.secrets[k]
+                    break
+            for k in key_keys:
+                if k in st.secrets:
+                    supabase_key = st.secrets[k]
+                    break
+    except Exception:
+        pass
+
+    # 2. Check environment variables
+    if not supabase_url:
+        for k in url_keys:
+            val = os.getenv(k)
+            if val and val.strip():
+                supabase_url = val.strip()
+                break
+
+    if not supabase_key:
+        for k in key_keys:
+            val = os.getenv(k)
+            if val and val.strip():
+                supabase_key = val.strip()
+                break
+
+    return supabase_url, supabase_key
+
+
+@st.cache_resource(show_spinner=False)
+def init_supabase_client() -> Tuple[Optional[Client], Optional[str]]:
+    """
+    Initialize and return the Supabase client instance.
+    Returns (client, error_message).
+    """
+    if not SUPABASE_INSTALLED:
+        return None, "The 'supabase' package is not installed. Please run: pip install -r requirements.txt"
+
+    url, key = get_supabase_credentials()
+
+    if not url or not key:
+        return None, (
+            "Supabase credentials not detected. Please ensure your .env file contains:\n"
+            "SUPABASE_URL=https://<your-project>.supabase.co\n"
+            "SUPABASE_PUBLISHABLE_KEY=<your-anon-or-publishable-key>\n"
+            "SUPABASE_SECRET_KEY=<your-secret-or-service-role-key>"
+        )
+
+    try:
+        client = create_client(url, key)
+        return client, None
+    except Exception as e:
+        return None, f"Failed to connect to Supabase: {str(e)}"
+
+
+def fetch_account_snapshots(client: Client, limit: int = 500) -> pd.DataFrame:
+    """
+    Fetch historical account snapshots sorted by timestamp ASC for the equity curve.
+    """
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        response = (
+            client.table("account_snapshots")
+            .select("*")
+            .order("timestamp", desc=False)
+            .limit(limit)
+            .execute()
+        )
+        data = response.data
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+        
+        # Numeric conversions
+        num_cols = [
+            "settled_cash",
+            "portfolio_value",
+            "buying_power",
+            "intraday_allocated",
+            "swing_allocated",
+            "crypto_allocated",
+        ]
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        return df
+    except Exception as e:
+        st.warning(f"Could not load account snapshots: {e}")
+        return pd.DataFrame()
+
+
+def fetch_trades(
+    client: Client,
+    status: Optional[str] = None,
+    asset_class: Optional[str] = None,
+    limit: int = 1000
+) -> pd.DataFrame:
+    """
+    Fetch trades from public.trades with optional filters.
+    """
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        query = client.table("trades").select("*").order("entry_time", desc=True)
+
+        if status:
+            query = query.eq("status", status.upper())
+        if asset_class and asset_class.lower() != "all":
+            query = query.ilike("asset_class", asset_class)
+
+        response = query.limit(limit).execute()
+        data = response.data
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        
+        # Datetime conversions
+        for dt_col in ["entry_time", "exit_time", "created_at"]:
+            if dt_col in df.columns:
+                df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
+
+        # Numeric conversions
+        numeric_cols = [
+            "qty",
+            "notional",
+            "entry_price",
+            "exit_price",
+            "fees",
+            "realized_pnl",
+            "pnl_percent",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        # Target & Risk management columns (preserve None if not set)
+        risk_cols = [
+            "take_profit_price",
+            "stop_loss_price",
+            "estimated_tp_pnl",
+            "estimated_tp_pct",
+            "estimated_sl_pnl",
+            "estimated_sl_pct",
+            "risk_reward_ratio",
+        ]
+        for col in risk_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df
+    except Exception as e:
+        st.warning(f"Could not load trades: {e}")
+        return pd.DataFrame()
+
+
+def fetch_trade_events(
+    client: Client,
+    symbol: Optional[str] = None,
+    limit: int = 200
+) -> pd.DataFrame:
+    """
+    Fetch recent trade audit events from public.trade_events.
+    """
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        query = client.table("trade_events").select("*").order("timestamp", desc=True)
+
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+
+        response = query.limit(limit).execute()
+        data = response.data
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+        return df
+    except Exception as e:
+        st.warning(f"Could not load trade events: {e}")
+        return pd.DataFrame()
+
+
+OPEN_ORDER_STATUSES = {
+    "new",
+    "accepted",
+    "pending_new",
+    "partially_filled",
+    "open",
+    "held",
+    "pending_replace",
+    "pending_cancel",
+}
+
+
+def fetch_orders(
+    client: Client,
+    limit: int = 500
+) -> pd.DataFrame:
+    """
+    Fetch order submissions and lifecycle states from public.orders.
+    """
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        query = client.table("orders").select("*").order("submitted_at", desc=True)
+        response = query.limit(limit).execute()
+        data = response.data
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        # Datetime conversions
+        for dt_col in ["submitted_at", "filled_at", "created_at"]:
+            if dt_col in df.columns:
+                df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
+
+        # Numeric conversions
+        num_cols = [
+            "qty",
+            "notional",
+            "limit_price",
+            "stop_price",
+            "filled_qty",
+            "filled_avg_price",
+        ]
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        return df
+    except Exception as e:
+        # Table might not exist yet or have no records
+        return pd.DataFrame()
+
+
