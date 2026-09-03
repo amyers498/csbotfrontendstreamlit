@@ -4,7 +4,7 @@ Handles resilient authentication, data querying, and Pandas transformations.
 """
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any, List
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -21,88 +21,119 @@ except ImportError:
     Client = None
 
 
-def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
+def sanitize_credential(val: Any) -> Optional[str]:
+    """Sanitize credential by removing surrounding whitespace, quotes, and newlines."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    return s if s else None
+
+
+def get_all_supabase_credentials() -> Tuple[Optional[str], list]:
     """
-    Search for Supabase credentials across standard environment variables
-    and Streamlit secrets.
+    Search for Supabase URL and all available candidate API keys across
+    Streamlit secrets and environment variables.
     """
-    # Potential URL environment variable names
     url_keys = [
         "SUPABASE_URL",
         "NEXT_PUBLIC_SUPABASE_URL",
         "VITE_SUPABASE_URL",
         "PUBLIC_SUPABASE_URL",
     ]
-    # Potential API key environment variable names
+    # Priority: Publishable / Anon keys first (these authenticate to PostgREST API), then Service Role / Secret keys
     key_keys = [
-        "SUPABASE_SECRET_KEY",
         "SUPABASE_PUBLISHABLE_KEY",
-        "SUPABASE_KEY",
-        "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_ANON_KEY",
-        "SUPABASE_SERVICE_KEY",
+        "SUPABASE_KEY",
         "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY",
+        "SUPABASE_SECRET_KEY",
     ]
 
     supabase_url = None
-    supabase_key = None
+    candidate_keys = []
 
     # 1. Check Streamlit secrets first (if in Streamlit environment)
     try:
         if hasattr(st, "secrets"):
             for k in url_keys:
                 if k in st.secrets:
-                    supabase_url = st.secrets[k]
-                    break
+                    val = sanitize_credential(st.secrets[k])
+                    if val:
+                        supabase_url = val
+                        break
             for k in key_keys:
                 if k in st.secrets:
-                    supabase_key = st.secrets[k]
-                    break
+                    val = sanitize_credential(st.secrets[k])
+                    if val and val not in candidate_keys:
+                        candidate_keys.append(val)
     except Exception:
         pass
 
     # 2. Check environment variables
     if not supabase_url:
         for k in url_keys:
-            val = os.getenv(k)
-            if val and val.strip():
-                supabase_url = val.strip()
+            val = sanitize_credential(os.getenv(k))
+            if val:
+                supabase_url = val
                 break
 
-    if not supabase_key:
-        for k in key_keys:
-            val = os.getenv(k)
-            if val and val.strip():
-                supabase_key = val.strip()
-                break
+    for k in key_keys:
+        val = sanitize_credential(os.getenv(k))
+        if val and val not in candidate_keys:
+            candidate_keys.append(val)
 
-    return supabase_url, supabase_key
+    return supabase_url, candidate_keys
+
+
+def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
+    """Return primary Supabase URL and best candidate key."""
+    url, keys = get_all_supabase_credentials()
+    return url, (keys[0] if keys else None)
 
 
 @st.cache_resource(show_spinner=False)
 def init_supabase_client() -> Tuple[Optional[Client], Optional[str]]:
     """
     Initialize and return the Supabase client instance.
+    Automatically tests candidate keys to guarantee valid PostgREST authentication.
     Returns (client, error_message).
     """
     if not SUPABASE_INSTALLED:
         return None, "The 'supabase' package is not installed. Please run: pip install -r requirements.txt"
 
-    url, key = get_supabase_credentials()
+    url, candidate_keys = get_all_supabase_credentials()
 
-    if not url or not key:
+    if not url or not candidate_keys:
         return None, (
-            "Supabase credentials not detected. Please ensure your .env file contains:\n"
-            "SUPABASE_URL=https://<your-project>.supabase.co\n"
-            "SUPABASE_PUBLISHABLE_KEY=<your-anon-or-publishable-key>\n"
-            "SUPABASE_SECRET_KEY=<your-secret-or-service-role-key>"
+            "Supabase credentials not detected. Please ensure your .env file or Streamlit Secrets contains:\n"
+            "SUPABASE_URL = \"https://<your-project>.supabase.co\"\n"
+            "SUPABASE_PUBLISHABLE_KEY = \"<your-publishable-or-anon-key>\""
         )
 
-    try:
-        client = create_client(url, key)
-        return client, None
-    except Exception as e:
-        return None, f"Failed to connect to Supabase: {str(e)}"
+    last_error = None
+    working_client = None
+
+    # Try each candidate key until one authenticates successfully
+    for key in candidate_keys:
+        try:
+            client = create_client(url, key)
+            # Healthcheck test query
+            client.table("trades").select("id").limit(1).execute()
+            return client, None
+        except Exception as e:
+            err_str = str(e)
+            last_error = err_str
+            # If 401 Unregistered API key, try the next candidate key in list
+            if "401" in err_str or "Unregistered API key" in err_str:
+                continue
+            # If other non-auth error (e.g. empty table or schema notice), connection itself is valid
+            return client, None
+
+    return None, f"Failed to authenticate with Supabase: {last_error}"
 
 
 def fetch_account_snapshots(client: Client, limit: int = 500) -> pd.DataFrame:
