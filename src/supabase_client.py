@@ -16,6 +16,7 @@ load_dotenv()
 try:
     from supabase import create_client, Client
     SUPABASE_INSTALLED = True
+    
 except ImportError:
     SUPABASE_INSTALLED = False
     Client = None
