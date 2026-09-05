@@ -3,9 +3,12 @@ Trade Reconciliation and Net Position Engine.
 Matches BUY and SELL orders, calculates realized PnL, and filters out crypto dust.
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
+
+
+from src.supabase_client import OPEN_ORDER_STATUSES
 
 
 def normalize_side(val: Any) -> str:
@@ -18,49 +21,98 @@ def normalize_side(val: Any) -> str:
     return str(val).upper()
 
 
-def enrich_risk_metrics(rec: Dict[str, Any]) -> Dict[str, Any]:
+def enrich_risk_metrics(rec: Dict[str, Any], orders_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     """
-    Ensure estimated_tp_pnl, estimated_sl_pnl, and risk_reward_ratio
-    are calculated if take_profit_price or stop_loss_price are present.
+    Ensure take_profit_price, stop_loss_price, estimated_tp_pnl, estimated_sl_pnl,
+    and risk_reward_ratio are fully populated and never missing.
+    Checks:
+    1. Explicit values in the trade record.
+    2. Resting limit/stop orders in orders_df from Alpaca.
+    3. Quantitative strategy target formulas (Crypto +6%/-5%, VWAP +2.5%/-1.25%, Swing +5%/-3%).
     """
     qty = float(rec.get("qty") or 0.0)
     entry_price = float(rec.get("entry_price") or 0.0)
-    side = rec.get("side", "BUY")
+    side = normalize_side(rec.get("side", "BUY"))
+    symbol = str(rec.get("symbol", "")).upper()
+    strategy = str(rec.get("strategy_tag", "")).lower()
+    asset_class = str(rec.get("asset_class", "")).lower()
 
     tp_price = rec.get("take_profit_price")
     sl_price = rec.get("stop_loss_price")
 
-    if tp_price is not None and pd.notnull(tp_price) and float(tp_price) > 0 and entry_price > 0:
+    # 1. If not set, check resting orders in orders_df
+    if (tp_price is None or pd.isna(tp_price) or float(tp_price) <= 0) and orders_df is not None and not orders_df.empty:
+        open_matches = orders_df[
+            (orders_df["symbol"] == symbol) &
+            (orders_df["status"].str.lower().isin(OPEN_ORDER_STATUSES))
+        ]
+        if not open_matches.empty:
+            for _, o in open_matches.iterrows():
+                o_type = str(o.get("order_type", "")).lower()
+                o_limit = float(o.get("limit_price") or 0.0)
+                o_stop = float(o.get("stop_price") or 0.0)
+                if o_type == "limit" and o_limit > 0:
+                    tp_price = o_limit
+                elif "stop" in o_type and o_stop > 0:
+                    sl_price = o_stop
+
+    # 2. If still not set, calculate based on quantitative strategy profile
+    if (tp_price is None or pd.isna(tp_price) or float(tp_price) <= 0) and entry_price > 0:
+        if "vwap" in strategy or "intraday" in strategy:
+            tp_pct_target = 2.5
+        elif "crypto" in strategy or asset_class == "crypto" or "/" in symbol:
+            tp_pct_target = 6.0
+        else:
+            tp_pct_target = 5.0
+
+        if side == "BUY":
+            tp_price = entry_price * (1.0 + tp_pct_target / 100.0)
+        else:
+            tp_price = entry_price * (1.0 - tp_pct_target / 100.0)
+
+    if (sl_price is None or pd.isna(sl_price) or float(sl_price) <= 0) and entry_price > 0:
+        if "vwap" in strategy or "intraday" in strategy:
+            sl_pct_target = 1.25
+        elif "crypto" in strategy or asset_class == "crypto" or "/" in symbol:
+            sl_pct_target = 5.0
+        else:
+            sl_pct_target = 3.0
+
+        if side == "BUY":
+            sl_price = entry_price * (1.0 - sl_pct_target / 100.0)
+        else:
+            sl_price = entry_price * (1.0 + sl_pct_target / 100.0)
+
+    # 3. Format and derive PnL / % values
+    if tp_price is not None and float(tp_price) > 0 and entry_price > 0:
         tp_price = float(tp_price)
-        rec["take_profit_price"] = tp_price
-        if rec.get("estimated_tp_pnl") is None or pd.isna(rec.get("estimated_tp_pnl")):
-            tp_pnl = (tp_price - entry_price) * qty if side == "BUY" else (entry_price - tp_price) * qty
-            rec["estimated_tp_pnl"] = round(tp_pnl, 2)
-        if rec.get("estimated_tp_pct") is None or pd.isna(rec.get("estimated_tp_pct")):
-            tp_pct = ((tp_price - entry_price) / entry_price * 100) if side == "BUY" else ((entry_price - tp_price) / entry_price * 100)
-            rec["estimated_tp_pct"] = round(tp_pct, 2)
+        rec["take_profit_price"] = round(tp_price, 4)
+        tp_pnl = (tp_price - entry_price) * qty if side == "BUY" else (entry_price - tp_price) * qty
+        tp_pct = ((tp_price - entry_price) / entry_price * 100) if side == "BUY" else ((entry_price - tp_price) / entry_price * 100)
+        rec["estimated_tp_pnl"] = round(tp_pnl, 2)
+        rec["estimated_tp_pct"] = round(tp_pct, 2)
 
-    if sl_price is not None and pd.notnull(sl_price) and float(sl_price) > 0 and entry_price > 0:
+    if sl_price is not None and float(sl_price) > 0 and entry_price > 0:
         sl_price = float(sl_price)
-        rec["stop_loss_price"] = sl_price
-        if rec.get("estimated_sl_pnl") is None or pd.isna(rec.get("estimated_sl_pnl")):
-            sl_pnl = (sl_price - entry_price) * qty if side == "BUY" else (entry_price - sl_price) * qty
-            rec["estimated_sl_pnl"] = round(sl_pnl, 2)
-        if rec.get("estimated_sl_pct") is None or pd.isna(rec.get("estimated_sl_pct")):
-            sl_pct = ((sl_price - entry_price) / entry_price * 100) if side == "BUY" else ((entry_price - sl_price) / entry_price * 100)
-            rec["estimated_sl_pct"] = round(sl_pct, 2)
+        rec["stop_loss_price"] = round(sl_price, 4)
+        sl_pnl = (sl_price - entry_price) * qty if side == "BUY" else (entry_price - sl_price) * qty
+        sl_pct = ((sl_price - entry_price) / entry_price * 100) if side == "BUY" else ((entry_price - sl_price) / entry_price * 100)
+        rec["estimated_sl_pnl"] = round(sl_pnl, 2)
+        rec["estimated_sl_pct"] = round(sl_pct, 2)
 
-    if rec.get("risk_reward_ratio") is None or pd.isna(rec.get("risk_reward_ratio")):
-        tp_pnl = rec.get("estimated_tp_pnl")
-        sl_pnl = rec.get("estimated_sl_pnl")
-        if tp_pnl is not None and sl_pnl is not None and float(sl_pnl) != 0:
-            rec["risk_reward_ratio"] = round(abs(float(tp_pnl) / float(sl_pnl)), 2)
+    tp_pnl_val = rec.get("estimated_tp_pnl")
+    sl_pnl_val = rec.get("estimated_sl_pnl")
+    if tp_pnl_val is not None and sl_pnl_val is not None and float(sl_pnl_val) != 0:
+        rec["risk_reward_ratio"] = round(abs(float(tp_pnl_val) / float(sl_pnl_val)), 2)
+    else:
+        rec["risk_reward_ratio"] = 1.5
 
     return rec
 
 
 def reconcile_trades_and_positions(
     trades_df: pd.DataFrame,
+    orders_df: Optional[pd.DataFrame] = None,
     dust_threshold_usd: float = 1.00,
     dust_pct_threshold: float = 0.01,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -101,7 +153,7 @@ def reconcile_trades_and_positions(
             status = str(row.get("status", "")).upper()
             # If the trade is already marked CLOSED in the database, directly add to closed records
             if status == "CLOSED":
-                closed_records.append(enrich_risk_metrics(row.to_dict()))
+                closed_records.append(enrich_risk_metrics(row.to_dict(), orders_df=orders_df))
                 continue
 
             side = row["norm_side"]
@@ -162,7 +214,7 @@ def reconcile_trades_and_positions(
                     "notes": f"Matched Round-Trip: Entry #{inv_lot['row']['id']} -> Exit #{row['id']}",
                     "created_at": row.get("created_at"),
                 }
-                closed_records.append(enrich_risk_metrics(matched_trade))
+                closed_records.append(enrich_risk_metrics(matched_trade, orders_df=orders_df))
 
                 # Deduct matched quantities
                 current_qty -= match_qty
@@ -224,7 +276,7 @@ def reconcile_trades_and_positions(
                     "notes": orig_row.get("notes"),
                     "created_at": orig_row.get("created_at"),
                 }
-                active_records.append(enrich_risk_metrics(active_rec))
+                active_records.append(enrich_risk_metrics(active_rec, orders_df=orders_df))
 
     active_df = pd.DataFrame(active_records) if active_records else pd.DataFrame(columns=trades_df.columns)
     closed_df = pd.DataFrame(closed_records) if closed_records else pd.DataFrame(columns=trades_df.columns)

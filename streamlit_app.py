@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 
 # Modular system imports
 from src.data_manager import load_dashboard_data
-from src.trade_reconciliation import reconcile_trades_and_positions
+from src.trade_reconciliation import reconcile_trades_and_positions, enrich_risk_metrics
 from src.market_data import fetch_live_price
 from src.trade_card_ui import format_trade_card_html
 from src.supabase_client import OPEN_ORDER_STATUSES
@@ -248,12 +248,15 @@ def render_live_dashboard(tracking_mode: str, dust_threshold: float, refresh_lab
     if tracking_mode == "Reconciled Net Positions":
         open_trades, closed_trades = reconcile_trades_and_positions(
             raw_trades,
+            orders_df=raw_orders,
             dust_threshold_usd=dust_threshold
         )
     else:
         if not raw_trades.empty:
-            open_trades = raw_trades[raw_trades["status"].str.upper() == "OPEN"].copy()
-            closed_trades = raw_trades[raw_trades["status"].str.upper() == "CLOSED"].copy()
+            open_raw = raw_trades[raw_trades["status"].str.upper() == "OPEN"].copy()
+            closed_raw = raw_trades[raw_trades["status"].str.upper() == "CLOSED"].copy()
+            open_trades = pd.DataFrame([enrich_risk_metrics(r, orders_df=raw_orders) for r in open_raw.to_dict("records")]) if not open_raw.empty else pd.DataFrame()
+            closed_trades = pd.DataFrame([enrich_risk_metrics(r, orders_df=raw_orders) for r in closed_raw.to_dict("records")]) if not closed_raw.empty else pd.DataFrame()
         else:
             open_trades = pd.DataFrame()
             closed_trades = pd.DataFrame()
@@ -379,33 +382,33 @@ def render_live_dashboard(tracking_mode: str, dust_threshold: float, refresh_lab
                 trade_item = open_list[i]
                 tp_val = trade_item.get("take_profit_price")
                 sl_val = trade_item.get("stop_loss_price")
-                tp_txt = f"${float(tp_val):,.2f}" if tp_val and float(tp_val) > 0 else "Not Set"
-                sl_txt = f"${float(sl_val):,.2f}" if sl_val and float(sl_val) > 0 else "Not Set"
+                tp_pct = trade_item.get("estimated_tp_pct")
+                sl_pct = trade_item.get("estimated_sl_pct")
+                tp_pct_str = f" (+{float(tp_pct):.1f}%)" if (tp_pct is not None and not pd.isna(tp_pct)) else ""
+                sl_pct_str = f" ({float(sl_pct):.1f}%)" if (sl_pct is not None and not pd.isna(sl_pct)) else ""
+                tp_txt = f"${float(tp_val):,.2f}{tp_pct_str}" if (tp_val is not None and float(tp_val) > 0) else "Not Set"
+                sl_txt = f"${float(sl_val):,.2f}{sl_pct_str}" if (sl_val is not None and float(sl_val) > 0) else "Not Set"
                 st.markdown(
-                    f"""
-                    <div style="background-color: #111827; border: 1px solid #10b981; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
-                        <div style="font-size: 0.75rem; color: #10b981; font-weight: 700; text-transform: uppercase;">🟢 Bullet {i+1} In Play</div>
-                        <div style="font-size: 1.08rem; font-weight: 700; color: #f8fafc; margin-top: 2px;">{trade_item.get('symbol')} <span style='font-size: 0.78rem; font-weight: 500; color: #94a3b8;'>({trade_item.get('strategy_tag')})</span></div>
-                        <div style="font-size: 0.78rem; color: #94a3b8; margin-top: 5px; line-height: 1.4;">
-                            Entry: <b>${float(trade_item.get('entry_price', 0)):,.2f}</b><br>
-                            🎯 Target (TP): <b style="color: #34d399;">{tp_txt}</b><br>
-                            🛑 Stop (SL): <b style="color: #f87171;">{sl_txt}</b>
-                        </div>
-                    </div>
-                    """,
+                    f"""<div style="background-color: #111827; border: 1px solid #10b981; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
+<div style="font-size: 0.75rem; color: #10b981; font-weight: 700; text-transform: uppercase;">🟢 Bullet {i+1} In Play</div>
+<div style="font-size: 1.08rem; font-weight: 700; color: #f8fafc; margin-top: 2px;">{trade_item.get('symbol')} <span style='font-size: 0.78rem; font-weight: 500; color: #94a3b8;'>({trade_item.get('strategy_tag')})</span></div>
+<div style="font-size: 0.78rem; color: #94a3b8; margin-top: 5px; line-height: 1.4;">
+Entry: <b>${float(trade_item.get('entry_price', 0)):,.2f}</b><br>
+🎯 Target (TP): <b style="color: #34d399;">{tp_txt}</b><br>
+🛑 Stop (SL): <b style="color: #f87171;">{sl_txt}</b>
+</div>
+</div>""",
                     unsafe_allow_html=True
                 )
             else:
                 st.markdown(
-                    f"""
-                    <div style="background-color: rgba(15, 23, 42, 0.55); border: 1px dashed #334155; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
-                        <div style="font-size: 0.75rem; color: #64748b; font-weight: 700; text-transform: uppercase;">⚪ Bullet {i+1} Available</div>
-                        <div style="font-size: 1.02rem; font-weight: 600; color: #94a3b8; margin-top: 2px;">Cash Reserve (~${ALLOCATION_PER_BULLET:,.0f})</div>
-                        <div style="font-size: 0.78rem; color: #64748b; margin-top: 5px;">
-                            Ready for next high-conviction signal (Mega-caps or Crypto).
-                        </div>
-                    </div>
-                    """,
+                    f"""<div style="background-color: rgba(15, 23, 42, 0.55); border: 1px dashed #334155; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
+<div style="font-size: 0.75rem; color: #64748b; font-weight: 700; text-transform: uppercase;">⚪ Bullet {i+1} Available</div>
+<div style="font-size: 1.02rem; font-weight: 600; color: #94a3b8; margin-top: 2px;">Cash Reserve (~${ALLOCATION_PER_BULLET:,.0f})</div>
+<div style="font-size: 0.78rem; color: #64748b; margin-top: 5px;">
+Ready for next high-conviction signal (Mega-caps or Crypto).
+</div>
+</div>""",
                     unsafe_allow_html=True
                 )
 
