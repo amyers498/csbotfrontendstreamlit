@@ -393,6 +393,47 @@ st.markdown("### ⚡ Active Positions & Projected Targets")
 bullet_pct = active_bullet_count / TOTAL_BULLETS
 st.progress(bullet_pct, text=f"Active Bullet Capacity: {active_bullet_count} of {TOTAL_BULLETS} Bullets In Play ({bullet_pct * 100:.0f}%)")
 
+# 3-Bullet Slots Dashboard Banner
+b_col1, b_col2, b_col3 = st.columns(3)
+slots = [b_col1, b_col2, b_col3]
+open_list = open_trades.to_dict("records") if not open_trades.empty else []
+
+for i in range(3):
+    with slots[i]:
+        if i < len(open_list):
+            trade_item = open_list[i]
+            tp_val = trade_item.get("take_profit_price")
+            sl_val = trade_item.get("stop_loss_price")
+            tp_txt = f"${float(tp_val):,.2f}" if tp_val and float(tp_val) > 0 else "Not Set"
+            sl_txt = f"${float(sl_val):,.2f}" if sl_val and float(sl_val) > 0 else "Not Set"
+            st.markdown(
+                f"""
+                <div style="background-color: #111827; border: 1px solid #10b981; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
+                    <div style="font-size: 0.75rem; color: #10b981; font-weight: 700; text-transform: uppercase;">🟢 Bullet {i+1} In Play</div>
+                    <div style="font-size: 1.08rem; font-weight: 700; color: #f8fafc; margin-top: 2px;">{trade_item.get('symbol')} <span style='font-size: 0.78rem; font-weight: 500; color: #94a3b8;'>({trade_item.get('strategy_tag')})</span></div>
+                    <div style="font-size: 0.78rem; color: #94a3b8; margin-top: 5px; line-height: 1.4;">
+                        Entry: <b>${float(trade_item.get('entry_price', 0)):,.2f}</b><br>
+                        🎯 Target (TP): <b style="color: #34d399;">{tp_txt}</b><br>
+                        🛑 Stop (SL): <b style="color: #f87171;">{sl_txt}</b>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"""
+                <div style="background-color: rgba(15, 23, 42, 0.55); border: 1px dashed #334155; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
+                    <div style="font-size: 0.75rem; color: #64748b; font-weight: 700; text-transform: uppercase;">⚪ Bullet {i+1} Available</div>
+                    <div style="font-size: 1.02rem; font-weight: 600; color: #94a3b8; margin-top: 2px;">Cash Reserve (~${ALLOCATION_PER_BULLET:,.0f})</div>
+                    <div style="font-size: 0.78rem; color: #64748b; margin-top: 5px;">
+                        Ready for next high-conviction signal (Mega-caps or Crypto).
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
 if not open_trades.empty:
     pos_header_col1, pos_header_col2 = st.columns([3, 1])
     with pos_header_col2:
@@ -408,7 +449,25 @@ if not open_trades.empty:
         for _, row in open_trades.iterrows():
             sym = row.get("symbol", "")
             live_px = fetch_live_price(sym)
-            card_html = format_trade_card_html(row.to_dict(), live_price=live_px, is_active=True)
+
+            # Find resting Alpaca orders for this symbol
+            working_desc = None
+            if not raw_orders.empty:
+                open_matches = raw_orders[
+                    (raw_orders["symbol"] == sym) &
+                    (raw_orders["status"].str.lower().isin(OPEN_ORDER_STATUSES))
+                ]
+                if not open_matches.empty:
+                    ord_row = open_matches.iloc[0]
+                    o_side = str(ord_row.get("side", "")).upper()
+                    o_type = str(ord_row.get("order_type", "")).upper()
+                    o_limit = float(ord_row.get("limit_price") or 0.0)
+                    o_stop = float(ord_row.get("stop_price") or 0.0)
+                    o_qty = float(ord_row.get("qty") or 0.0)
+                    price_str = f"@ Limit ${o_limit:,.2f}" if o_limit > 0 else (f"@ Stop ${o_stop:,.2f}" if o_stop > 0 else "")
+                    working_desc = f"{o_side} {o_type} {o_qty:,.4f} {price_str} &bull; Alpaca ID #{str(ord_row.get('alpaca_order_id', ''))[:8]} (Status: {ord_row.get('status', '').upper()})"
+
+            card_html = format_trade_card_html(row.to_dict(), live_price=live_px, is_active=True, working_order_desc=working_desc)
             st.markdown(card_html, unsafe_allow_html=True)
     else:
         disp_open = open_trades.copy()
@@ -727,3 +786,4 @@ st.caption(
     "Crypto & Stock Bot 2026 • Real-time quantitative risk and execution dashboard. "
     "Designed for the 3-Bullet Capital Allocation Framework."
 )
+

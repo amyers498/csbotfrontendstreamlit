@@ -98,6 +98,12 @@ def reconcile_trades_and_positions(
         inventory: List[Dict[str, Any]] = []
 
         for _, row in group.iterrows():
+            status = str(row.get("status", "")).upper()
+            # If the trade is already marked CLOSED in the database, directly add to closed records
+            if status == "CLOSED":
+                closed_records.append(enrich_risk_metrics(row.to_dict()))
+                continue
+
             side = row["norm_side"]
             qty = float(row.get("qty", 0.0))
             price = float(row.get("entry_price", 0.0))

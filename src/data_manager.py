@@ -66,3 +66,4 @@ def load_dashboard_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
         return trades_df, snapshots_df, orders_df, events_df, "Local SQLite (data/trades.db)", True, msg
     except Exception as sq_err:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "Offline / Error", True, f"Both Supabase ({sb_err}) and SQLite ({sq_err}) failed."
+

@@ -208,3 +208,4 @@ def fetch_sqlite_events(conn: sqlite3.Connection) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+

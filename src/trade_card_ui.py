@@ -12,7 +12,8 @@ import streamlit as st
 def format_trade_card_html(
     row: Dict[str, Any],
     live_price: Optional[float] = None,
-    is_active: bool = True
+    is_active: bool = True,
+    working_order_desc: Optional[str] = None,
 ) -> str:
     """
     Format a single trade card with exact target profit, max risk, and R:R styling.
@@ -138,6 +139,34 @@ def format_trade_card_html(
 
     notes_snippet = f'<div style="font-size: 0.78rem; color: #64748b; margin-top: 8px; font-style: italic;">📝 {notes}</div>' if notes else ""
 
+    # Exit Plan & Trigger Rules
+    exit_plan_html = ""
+    if is_active:
+        exit_triggers = []
+        if tp_price is not None and pd.notnull(tp_price) and float(tp_price) > 0:
+            exit_triggers.append(f"🎯 <b>Take-Profit Target</b>: ${float(tp_price):,.2f}")
+        if sl_price is not None and pd.notnull(sl_price) and float(sl_price) > 0:
+            exit_triggers.append(f"🛑 <b>Stop-Loss Trigger</b>: ${float(sl_price):,.2f}")
+
+        if "vwap" in strat_lower or "intraday" in strat_lower:
+            exit_triggers.append("⏰ <b>EOD Flush</b>: 3:45 PM EST liquidation")
+        elif "crypto" in strat_lower:
+            exit_triggers.append("🟣 <b>Trend Rule</b>: 1H trend flip or TP/SL")
+        elif "swing" in strat_lower:
+            exit_triggers.append("📈 <b>Swing Rule</b>: Multi-day hold until TP/SL or 20 SMA break")
+
+        broker_badge = ""
+        if working_order_desc:
+            broker_badge = f"<div style='color: #38bdf8; font-size: 0.8rem; font-weight: 600; margin-top: 5px;'>🛡️ <b>Live on Alpaca</b>: {working_order_desc}</div>"
+
+        triggers_text = " &bull; ".join(exit_triggers) if exit_triggers else "TP / SL monitored by bot"
+        exit_plan_html = f"""
+        <div style="background-color: rgba(30, 41, 59, 0.45); border: 1px dashed #334155; border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 0.8rem; color: #cbd5e1;">
+            <div>⚡ <b>Exit Plan</b>: {triggers_text}</div>
+            {broker_badge}
+        </div>
+        """
+
     html = f"""
     <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);">
       <!-- Top Row: Symbol, Badges, Time -->
@@ -191,6 +220,7 @@ def format_trade_card_html(
           {rr_str}
         </div>
       </div>
+      {exit_plan_html}
       {notes_snippet}
     </div>
     """
