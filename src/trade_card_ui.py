@@ -93,6 +93,45 @@ def format_trade_card_html(
     else:
         rr_str = "⚖️ R:R: <span style='color: #64748b;'>N/A</span>"
 
+    # Duration calculation
+    duration_str = ""
+    if pd.notnull(entry_time):
+        try:
+            now_dt = pd.Timestamp.now(tz=entry_time.tz) if getattr(entry_time, "tz", None) else pd.Timestamp.now()
+            end_time = row.get("exit_time") if not is_active else now_dt
+            if pd.notnull(end_time):
+                if getattr(end_time, "tz", None) != getattr(entry_time, "tz", None):
+                    if getattr(entry_time, "tz", None):
+                        end_time = end_time.tz_convert(entry_time.tz)
+                diff = end_time - entry_time
+                total_sec = max(0, int(diff.total_seconds()))
+                hrs = total_sec // 3600
+                mins = (total_sec % 3600) // 60
+                days = hrs // 24
+                if days > 0:
+                    duration_str = f"{days}d {hrs % 24}h"
+                elif hrs > 0:
+                    duration_str = f"{hrs}h {mins}m"
+                else:
+                    duration_str = f"{mins}m"
+        except Exception:
+            duration_str = ""
+
+    # Strategy badge styling
+    strat_lower = strategy.lower()
+    if "vwap" in strat_lower or "intraday" in strat_lower:
+        strat_badge = f'<span style="background-color: rgba(6, 182, 212, 0.18); color: #22d3ee; border: 1px solid #0891b2; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 600; margin-left: 6px;">⚡ Intraday VWAP</span>'
+    elif "crypto" in strat_lower:
+        strat_badge = f'<span style="background-color: rgba(168, 85, 247, 0.18); color: #c084fc; border: 1px solid #9333ea; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 600; margin-left: 6px;">🟣 Crypto 1H Trend</span>'
+    elif "swing" in strat_lower or "sma" in strat_lower:
+        strat_badge = f'<span style="background-color: rgba(59, 130, 246, 0.18); color: #60a5fa; border: 1px solid #2563eb; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 600; margin-left: 6px;">📈 Equity Swing (20 SMA)</span>'
+    elif "manual" in strat_lower:
+        strat_badge = f'<span style="background-color: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid #d97706; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 600; margin-left: 6px;">🤝 Alpaca Manual Swing</span>'
+    else:
+        strat_badge = f'<span style="background-color: #1e293b; color: #94a3b8; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 500; margin-left: 6px;">🏷️ {strategy}</span>'
+
+    duration_badge = f'<span style="background-color: rgba(51, 65, 85, 0.7); color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; margin-left: 6px;">⏱️ Held: {duration_str}</span>' if duration_str else ""
+
     # Badge classes
     side_badge = f'<span class="badge-buy">{side}</span>' if side == "BUY" else f'<span class="badge-sell">{side}</span>'
     asset_badge = f'<span style="background-color: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid #4f46e5; border-radius: 4px; padding: 2px 7px; font-weight: 600; font-size: 0.75rem; margin-left: 6px;">{asset_class}</span>'
@@ -102,12 +141,13 @@ def format_trade_card_html(
     html = f"""
     <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);">
       <!-- Top Row: Symbol, Badges, Time -->
-      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 10px; margin-bottom: 14px;">
-        <div style="display: flex; align-items: center;">
-          <span style="font-size: 1.28rem; font-weight: 700; color: #f8fafc; margin-right: 10px; letter-spacing: 0.5px;">{symbol}</span>
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 10px; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+        <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">
+          <span style="font-size: 1.28rem; font-weight: 700; color: #f8fafc; margin-right: 8px; letter-spacing: 0.5px;">{symbol}</span>
           {side_badge}
           {asset_badge}
-          <span style="background-color: #1e293b; color: #94a3b8; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 500; margin-left: 6px;">🏷️ {strategy}</span>
+          {strat_badge}
+          {duration_badge}
         </div>
         <div style="font-size: 0.8rem; color: #94a3b8;">
           🕒 {time_str}
